@@ -51,6 +51,14 @@ if (params.help) {
         Required extra params for FROM_CLEAN_CHAINS (--from clean_chains):
             --filled_chain           PATH  Path to *.filled.chain.gz
 
+    Early exit (stop before the rest of the pipeline runs):
+        --stop_after lastz        Run genome prep + LASTZ, then stop. Chain
+                                  building, fill and clean do NOT run. PSL output
+                                  is copied to <outdir>/02_lastz_psl (per pair) and
+                                  <outdir>/03_concat_lastz_output (merged).
+                                  Equivalent to -entry LASTZ_ONLY; use --stop_after
+                                  when driving the run from -params-file.
+
 
     Pass all parameters from a JSON file (replaces old --params_from_file):
         nextflow run main.nf -params-file my_params.json
@@ -95,6 +103,7 @@ if (params.help) {
 */
 
 include { MAKE_LASTZ_CHAINS as CHAINS } from './workflows/make_lastz_chains'
+include { LASTZ_ALIGNMENT   } from './subworkflows/local/lastz_alignment/main'
 include { FILL_CLEAN_CHAINS } from './subworkflows/local/fill_clean_chains/main'
 include { CHAIN_CLEANER     } from './modules/local/chain_cleaner/main'
 include { CHAINTOOLS_FILTER as CHAINTOOLS_FILTER_CLEANED_CHAINS } from './modules/local/chaintools/filter/main'
@@ -169,7 +178,21 @@ def validateFromCleanChains() {
 */
 
 workflow MAKE_LASTZ_CHAINS {
-    if (params.from == "fill_chains") {
+    if (params.stop_after && params.stop_after != "lastz") {
+        log.error "--stop_after must be 'lastz' (got '${params.stop_after}')"
+        System.exit(1)
+    }
+    if (params.stop_after && params.from) {
+        log.error "--stop_after ${params.stop_after} cannot be combined with --from ${params.from} — " +
+                  "every --from checkpoint starts after LASTZ has already run"
+        System.exit(1)
+    }
+
+    if (params.stop_after == "lastz") {
+        // ── Early exit: genome prep + LASTZ only ───────────────────────────────────
+        log.info "Stopping after LASTZ — chain building, fill and clean will not run"
+        LASTZ_ONLY()
+    } else if (params.from == "fill_chains") {
         // ── Checkpoint: start from merged chain (skip LASTZ + chain building) ──────
         log.info "Resuming from ${params.from} checkpoint — skipping LASTZ + chain building"
         FROM_FILL_CHAINS()
@@ -221,6 +244,48 @@ workflow FULL_RUN {
         params.query_name,
         params.reference_genome,
         params.query_genome
+    )
+}
+
+// ── Early exit: genome prep + LASTZ only ───────────────────────────────────
+// Output: results/02_lastz_psl/*.psl        (one per reference×query pair)
+//         results/03_concat_lastz_output/*.psl (merged per reference bucket)
+// Both are published with mode 'copy', so the run's work/ directory can be
+// deleted afterwards without losing the alignments.
+workflow LASTZ_ONLY {
+    validateFullRun()
+
+    log.info """
+    make_lastz_chains v${workflow.manifest.version} — LASTZ_ONLY
+
+    Authors: ${workflow.manifest.author}
+    Github:  ${workflow.manifest.homePage}
+
+      Reference : ${params.reference_name}  (${params.reference_genome})
+      Query  : ${params.query_name}   (${params.query_genome})
+      Outdir : ${params.outdir}
+      Stop   : after LASTZ — chain build, fill and clean are NOT run
+      Profile: ${workflow.profile}
+    """.stripIndent()
+
+    // ── 1. Prepare genomes ─────────────────────────────────────────────────
+    PREPARE_REFERENCE_GENOME (
+        params.reference_name,
+        params.reference_genome,
+        true
+    )
+    PREPARE_QUERY_GENOME (
+        params.query_name,
+        params.query_genome,
+        true
+    )
+
+    // ── 2. LASTZ alignment ─────────────────────────────────────────────────
+    LASTZ_ALIGNMENT (
+        PREPARE_REFERENCE_GENOME.out.prepared,
+        PREPARE_QUERY_GENOME.out.prepared,
+        PREPARE_REFERENCE_GENOME.out.chroms_dir,
+        PREPARE_QUERY_GENOME.out.chroms_dir
     )
 }
 
@@ -423,13 +488,21 @@ workflow FROM_CLEAN_CHAINS {
 */
 
 workflow.onComplete {
+    // A LASTZ-only run is expected to stop before any chain is written, so the
+    // missing-final-chain warning below must not fire for it.
+    def lastz_only = params.stop_after == 'lastz' || workflow.commandLine?.contains('LASTZ_ONLY')
+
     if (workflow.success) {
-        def final_chain = file("${params.outdir}/07_final/${params.reference_name}.${params.query_name}.allfilled.chain.gz")
         log.info "Pipeline completed successfully!"
-        if (final_chain.exists()) {
-            log.info "Final chain: ${final_chain}"
+        if (lastz_only) {
+            log.info "Stopped after LASTZ — PSL output: ${params.outdir}/03_concat_lastz_output"
         } else {
-            log.warn "Pipeline reported success but final chain file was not produced — check that all steps ran"
+            def final_chain = file("${params.outdir}/07_final/${params.reference_name}.${params.query_name}.allfilled.chain.gz")
+            if (final_chain.exists()) {
+                log.info "Final chain: ${final_chain}"
+            } else {
+                log.warn "Pipeline reported success but final chain file was not produced — check that all steps ran"
+            }
         }
         log.info "Run time   : ${workflow.duration}"
     } else {

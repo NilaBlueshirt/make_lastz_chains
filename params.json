@@ -7,6 +7,9 @@
     "query_genome": null,
     "outdir": "./results",
     "use_container": true,
+    "//0": "── Early exit ──────────────────────────────────────────────────────────",
+    "//0a": "Set to \"lastz\" to run genome prep + LASTZ and stop (output in 02_lastz_psl and 03_concat_lastz_output). Leave null to run the full pipeline. Cannot be combined with \"from\".",
+    "stop_after": null,
     "//1": "── Checkpoint entry point inputs ───────────────────────────────────────",
     "//1a": "Used with --from chain_antirepeat (STEP 04_axtchain), --from fill_chains (STEP 04_axtchain_merged_chains) or --from clean_chains (STEP 05_filled_chains)",
     "from": null,
@@ -41,5 +44,5 @@
     "fill_lastz_l": 3000,
     "//6": "── Clean chains (set skip_clean_chain to true to disable this step) ────",
     "skip_clean_chain": false,
-    "clean_chain_parameters": "-LRfoldThreshold=2.5 -doPairs -LRfoldThresholdPairs=10 -maxPairDistance=10000 -maxSuspectScore=100000 -minBrokenChainScore=75000",
+    "clean_chain_parameters": "-LRfoldThreshold=2.5 -doPairs -LRfoldThresholdPairs=10 -maxPairDistance=10000 -maxSuspectScore=100000 -minBrokenChainScore=75000"
 }
