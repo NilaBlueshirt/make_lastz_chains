@@ -85,6 +85,19 @@ Smoke test:
 nextflow run main.nf -profile test,apptainer
 ```
 
+### Stop after LASTZ
+
+To run genome preparation and LASTZ without building, filling, or cleaning chains:
+
+```bash
+nextflow run main.nf -params-file params.json --stop_after lastz -profile apptainer
+```
+
+This copies the individual PSL files to `results/lastz_psl/` and the
+concatenated, compressed PSL files to `results/concat_lastz_output/`. Set
+`"stop_after": "lastz"` in `params.json` to use the same mode without the
+command-line flag. Leave it `null` for a full pipeline run.
+
 </details>
 
 ---
