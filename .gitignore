@@ -49,3 +49,6 @@ work/
 .nextflow*
 
 
+
+# k8s deployment: real credentials (template is *.yaml.example)
+deploy/k8s/02-secret-helios-s3.yaml

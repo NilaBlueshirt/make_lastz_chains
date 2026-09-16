@@ -1,0 +1,246 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Nextflow config overlay + pipeline parameters, delivered to the driver pod
+# at /etc/mlc/.
+#
+# k8s.config is LAYERED ON TOP of the repo's nextflow.config via `-c`. Nothing
+# in the upstream repo is modified, so `nextflow pull` / a version bump won't
+# clobber your cluster settings.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mlc-pipeline-config
+  namespace: make-lastz-chains
+data:
+  k8s.config: |
+    /*
+     * make_lastz_chains — Kubernetes executor + Fusion/S3 overlay
+     *
+     * Applied with:  nextflow run ... -c /etc/mlc/k8s.config
+     *
+     * Storage model: there is no shared POSIX filesystem. The Nextflow work
+     * directory lives in the "helios" S3 bucket, and the Fusion client mounts
+     * it into every task pod as a lazily-fetched FUSE filesystem backed by
+     * node-local disk. That is what makes pod-per-task viable without RWX.
+     */
+
+    // ── Work directory (object storage, not a PVC) ───────────────────────────
+    workDir = 's3://REPLACE_ME_BUCKET/mlc-work'
+
+    // ── Executor ─────────────────────────────────────────────────────────────
+    process {
+        executor = 'k8s'
+
+        // Fusion already gives each task a node-local scratch view of S3.
+        // Leaving scratch on would stage everything a second time onto the
+        // same node disk.
+        scratch = false
+
+        // Cap every request at what one node can actually fit, so a task that
+        // escalates its memory on retry becomes slower rather than permanently
+        // Pending/Unschedulable. Leaves ~20 GB and 2 cores for kubelet.
+        resourceLimits = [ cpus: 150, memory: 480.GB, time: 240.h ]
+    }
+
+    k8s {
+        namespace           = 'make-lastz-chains'
+        serviceAccount      = 'nextflow-runner'
+
+        // 'Pod' creates one API object per task instead of two. The pipeline's
+        // errorStrategy already retries on a vanished pod (null exit status),
+        // so Job's restart handling buys little at this task count.
+        computeResourceType = 'Pod'
+
+        // Request CPU without setting a limit: a 1-cpu LASTZ pod can burst into
+        // idle cores on a 152-core node instead of being throttled.
+        cpuLimits           = false
+
+        // Records the node each task landed on in the execution trace. Cheap,
+        // and the first thing you want when one node misbehaves.
+        fetchNodeName       = true
+
+        httpConnectTimeout  = '60s'
+        httpReadTimeout     = '60s'
+
+        retryPolicy {
+            maxAttempts = 10
+            delay       = '500ms'
+            maxDelay    = '90s'
+            jitter      = 0.25
+        }
+
+        pod = [
+            // Fusion's cache and all task scratch land here. emptyDir = node
+            // local disk. Size this as (node disk budget / pods per node);
+            // with ~40 concurrent pods on a 500 GB node, 12 Gi is comfortable.
+            [ emptyDir: [ medium: 'Disk', sizeLimit: '12Gi' ], mountPath: '/tmp' ],
+
+            // Uncomment to confine the pipeline to a specific node pool:
+            // [ nodeSelector: 'node-role.kubernetes.io/compute=true' ],
+            // [ tolerations: [[ key: 'dedicated', operator: 'Equal',
+            //                   value: 'genomics', effect: 'NoSchedule' ]] ],
+        ]
+    }
+
+    executor {
+        // Concurrent task pods in flight. 500 is a deliberately conservative
+        // start — it is already ~13 fully-packed nodes. Raise it once you have
+        // watched the API server keep up; the LASTZ stage can absorb thousands.
+        queueSize       = 500
+        submitRateLimit = '50/1sec'
+        pollInterval    = '5s'
+    }
+
+    // ── Fusion file system ───────────────────────────────────────────────────
+    fusion {
+        enabled                  = true
+
+        // Forwards the driver's AWS_* credentials into every task pod, so the
+        // Fusion client in each pod can reach helios. Without this, tasks mount
+        // nothing and every job fails at stage-in.
+        exportStorageCredentials = true
+
+        // Per-pod local cache, held under /tmp (the emptyDir above).
+        cacheSize                = '4 GB'
+
+        // ⚠ THE ONE THING TO CHECK WITH YOUR CLUSTER ADMIN.
+        // Fusion is a FUSE mount. With `privileged = true` (the default)
+        // Nextflow marks every task pod's container privileged. Many
+        // university clusters forbid that under Pod Security Admission
+        // "baseline"/"restricted".
+        //
+        // If privileged pods are not allowed, ask your admin to install the
+        // k8s-fuse-plugin DaemonSet (github.com/nextflow-io/k8s-fuse-plugin),
+        // then flip this to false — Nextflow will request the
+        // nextflow.io/fuse device instead of privilege.
+        privileged               = true
+    }
+
+    // Wave injects the Fusion client layer into the pipeline's container image
+    // at pull time. 'container' means: only augment the image we name, never
+    // try to build one from a conda recipe.
+    wave {
+        enabled  = true
+        strategy = 'container'
+    }
+
+    // ── helios object store (S3-compatible, non-AWS) ─────────────────────────
+    aws {
+        // Arbitrary but required: the AWS SDK refuses to build a client without
+        // a region even when talking to a non-AWS endpoint.
+        region = 'us-east-1'
+        client {
+            endpoint          = 'https://REPLACE_ME_HELIOS_ENDPOINT'
+            s3PathStyleAccess = true
+        }
+    }
+
+    // `k8s.fetchNodeName` collects the node name, but it only reaches the trace
+    // file if `hostname` is in the field list — and naming any field replaces
+    // the defaults, so the full default set is repeated here.
+    trace {
+        fields = 'task_id,hash,native_id,name,status,exit,submit,duration,realtime,%cpu,peak_rss,peak_vmem,rchar,wchar,hostname'
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // Per-process overrides that are specific to running on Kubernetes + S3.
+    // Each block below fixes something that only breaks off a shared POSIX
+    // filesystem, or only wastes resources on this hardware.
+    // ══════════════════════════════════════════════════════════════════════════
+    process {
+
+        // ── publishDir: symlink mode is impossible on object storage ─────────
+        // Upstream publishes four intermediate outputs with mode 'symlink',
+        // which is free on a shared POSIX filesystem and meaningless on S3.
+        // Switched to 'copy' so the same artifacts still land in outdir.
+        //
+        // 02_lastz_psl is by far the largest of the four (thousands of PSL
+        // files). If you do not need the raw per-partition alignments, replace
+        // the publishDir block below with `publishDir = [ enabled: false ]`.
+        withName: '.*:LASTZ' {
+            publishDir = [
+                path: { "${params.outdir}/02_lastz_psl" },
+                mode: 'copy',
+                pattern: '*.psl'
+            ]
+
+            // Upstream staggers LASTZ starts to avoid a SLURM prolog storm.
+            // The kube-scheduler has no such problem, and at this task count
+            // the average 30 s sleep is days of aggregate wall-clock. 'true'
+            // is a no-op shell builtin.
+            beforeScript = 'true'
+
+            // ── Density tuning (DELETE THIS LINE to use upstream's 24 GB) ────
+            // LASTZ is single-threaded, so memory is what limits pods per node:
+            // at 24 GB only ~20 pods fit on a 500 GB node and 130 of its 152
+            // cores sit idle. 12 GB roughly doubles density.
+            //
+            // This is safe to tune aggressively because the failure mode is
+            // self-correcting: a Kubernetes OOM-kill exits 137, which is inside
+            // the pipeline's retry range (130..145), and `task.attempt` scaling
+            // means the retry asks for 24 GB, then 36, up to 96 GB by the
+            // eighth attempt. Watch peak_rss in the trace on your first real
+            // pair and settle on a number.
+            memory = { 12.GB * task.attempt }
+        }
+
+        withName: '.*:AXT_CHAIN' {
+            publishDir = [
+                path: { "${params.outdir}/04_axtchain" },
+                mode: 'copy',
+                pattern: '*.chain'
+            ]
+        }
+
+        withName: '.*:CHAINTOOLS_ANTIREPEAT' {
+            publishDir = [
+                path: { "${params.outdir}/04_axtchain/chain_antirepeat" },
+                mode: 'copy',
+                pattern: '*.chain'
+            ]
+        }
+
+        withName: '.*:CHAINC' {
+            publishDir = [
+                path: { "${params.outdir}/06_cleaned_chains" },
+                mode: 'copy'
+            ]
+        }
+    }
+
+  params.json: |
+    {
+      "reference_name": "REPLACE_ME_REF_NAME",
+      "query_name": "REPLACE_ME_QUERY_NAME",
+      "reference_genome": "s3://REPLACE_ME_BUCKET/input/REPLACE_ME_REF.fa",
+      "query_genome": "s3://REPLACE_ME_BUCKET/input/REPLACE_ME_QUERY.fa",
+      "outdir": "s3://REPLACE_ME_BUCKET/mlc-results",
+      "use_container": true,
+
+      "seq1_chunk": 175000000,
+      "seq2_chunk": 50000000,
+      "seq1_lap": 0,
+      "seq2_lap": 10000,
+
+      "lastz_y": 9400,
+      "lastz_h": 2000,
+      "lastz_l": 3000,
+      "lastz_k": 2400,
+
+      "min_chain_score": 1000,
+      "chain_linear_gap": "loose",
+      "bundle_psl_max_bases": 1000000,
+
+      "skip_fill_chains": false,
+      "skip_fill_unmask": false,
+      "num_fill_jobs": 1000,
+      "fill_insert_chain_min_score": 5000,
+      "fill_gap_max_size_t": 20000,
+      "fill_gap_max_size_q": 20000,
+      "fill_gap_min_size_t": 30,
+      "fill_gap_min_size_q": 30,
+      "fill_lastz_k": 2000,
+      "fill_lastz_l": 3000,
+
+      "skip_clean_chain": false
+    }

@@ -1,0 +1,92 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Smoke test — run this BEFORE 05-driver-job.yaml.
+#
+# Runs the repo's bundled toy genome pair (a few minutes, a handful of pods).
+# It proves the four things most likely to be wrong on a first deployment, in
+# the order they will bite you:
+#
+#   1. RBAC        — can the driver create task pods at all?
+#   2. Wave        — can it augment the image with the Fusion client?
+#   3. FUSE        — do privileged task pods get scheduled, or does Pod
+#                    Security Admission reject them?
+#   4. helios      — do the credentials, endpoint and path-style access work?
+#
+# Deliberately uses emptyDir, not the driver PVC, so you can run it before
+# settling the StorageClass question.
+#
+# `--use_container true` matters: the repo's `test` profile sets it false,
+# which leaves per-module container images. Forcing it true keeps everything on
+# the one image, so Wave has one thing to augment instead of a dozen.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlc-smoke-test
+  namespace: make-lastz-chains
+  labels:
+    app.kubernetes.io/name: make-lastz-chains
+    app.kubernetes.io/component: smoke-test
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: make-lastz-chains
+        app.kubernetes.io/component: smoke-test
+    spec:
+      serviceAccountName: nextflow-runner
+      restartPolicy: Never
+      containers:
+        - name: nextflow
+          image: nextflow/nextflow:25.10.4
+          workingDir: /workspace
+          command: ["/bin/bash", "-euo", "pipefail", "-c"]
+          args:
+            - |
+              nextflow run hillerlab/make_lastz_chains \
+                -r v3.1.7 \
+                -c /etc/mlc/k8s.config \
+                -profile test \
+                --use_container true \
+                --outdir "s3://${MLC_BUCKET}/mlc-smoke-results" \
+                -w "s3://${MLC_BUCKET}/mlc-smoke-work" \
+                -ansi-log false
+          env:
+            - name: MLC_BUCKET
+              value: "REPLACE_ME_BUCKET"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: helios-s3
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: helios-s3
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: NXF_OPTS
+              value: "-Xms512m -Xmx3g"
+            - name: NXF_HOME
+              value: "/workspace/.nextflow-home"
+            - name: NXF_ASSETS_DIR
+              value: "/workspace/assets"
+            - name: NXF_ANSI_LOG
+              value: "false"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              memory: 4Gi
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: pipeline-config
+              mountPath: /etc/mlc
+              readOnly: true
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: pipeline-config
+          configMap:
+            name: mlc-pipeline-config

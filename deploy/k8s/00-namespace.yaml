@@ -1,0 +1,13 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Namespace for the make_lastz_chains pipeline.
+#
+# Every other manifest in this directory assumes this namespace. If your cluster
+# admin gives you a pre-existing namespace instead, skip this file and change
+# `namespace:` everywhere else (and `k8s.namespace` in 03-configmap.yaml).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: make-lastz-chains
+  labels:
+    app.kubernetes.io/name: make-lastz-chains

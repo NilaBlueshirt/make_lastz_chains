@@ -1,0 +1,115 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# The Nextflow driver.
+#
+# This single pod is the workflow orchestrator. It does no alignment itself —
+# it submits one task pod per LASTZ chunk / chain step to the API server and
+# waits. Expect it to be long-lived (hours to days for a mammalian pair), so
+# give it real memory: the head JVM holds the task graph for the entire run.
+#
+# The driver does NOT need privileged: it reaches S3 through Nextflow's own
+# client, not through Fusion. Only the task pods mount Fusion.
+#
+# Outbound network the driver needs:
+#   • the Kubernetes API server            (task submission)
+#   • github.com                           (pulling the pipeline at -r)
+#   • wave.seqera.io                       (Fusion container augmentation)
+#   • ghcr.io / quay.io                    (base images)
+#   • your helios S3 endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlc-driver
+  namespace: make-lastz-chains
+  labels:
+    app.kubernetes.io/name: make-lastz-chains
+    app.kubernetes.io/component: driver
+spec:
+  # Nextflow does its own task-level retries. A driver restart would replay the
+  # whole run, so fail loudly instead and restart deliberately with -resume.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: make-lastz-chains
+        app.kubernetes.io/component: driver
+    spec:
+      serviceAccountName: nextflow-runner
+      restartPolicy: Never
+      containers:
+        - name: nextflow
+          image: nextflow/nextflow:25.10.4
+          workingDir: /workspace
+          command: ["/bin/bash", "-euo", "pipefail", "-c"]
+          args:
+            - |
+              nextflow run hillerlab/make_lastz_chains \
+                -r v3.1.7 \
+                -c /etc/mlc/k8s.config \
+                -params-file /etc/mlc/params.json \
+                -name "$MLC_RUN_NAME" \
+                -ansi-log false
+              # To restart a failed run without redoing completed work, append
+              # `-resume` above and re-apply this Job. The .nextflow/ cache on
+              # the workspace PVC is what makes that possible.
+          env:
+            # Nextflow reads these directly; fusion.exportStorageCredentials
+            # then forwards them into every task pod.
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: helios-s3
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: helios-s3
+                  key: AWS_SECRET_ACCESS_KEY
+
+            # Give the run a stable name so -resume can find it. Change this
+            # per pipeline invocation.
+            - name: MLC_RUN_NAME
+              value: "mlc-run-1"
+
+            # Head JVM heap. Thousands of in-flight tasks live in here; the
+            # default heap will OOM partway through the LASTZ stage.
+            - name: NXF_OPTS
+              value: "-Xms1g -Xmx12g"
+
+            # Keep the cache, pipeline assets and plugins on the PVC so they
+            # survive a driver restart.
+            - name: NXF_HOME
+              value: "/workspace/.nextflow-home"
+            - name: NXF_ASSETS_DIR
+              value: "/workspace/assets"
+            - name: NXF_ANSI_LOG
+              value: "false"
+
+            # Uncomment if your Seqera/Wave usage requires an access token
+            # (higher Wave rate limits, or a private container registry).
+            # - name: TOWER_ACCESS_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: seqera-token
+            #       key: TOWER_ACCESS_TOKEN
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+            limits:
+              memory: 16Gi
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: pipeline-config
+              mountPath: /etc/mlc
+              readOnly: true
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: mlc-driver-workspace
+          # No dynamic provisioner? Replace the two lines above with:
+          # emptyDir: {}
+        - name: pipeline-config
+          configMap:
+            name: mlc-pipeline-config

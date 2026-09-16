@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# RBAC for the Nextflow driver.
+#
+# The driver pod talks to the Kubernetes API to create one pod per pipeline task
+# and to stream its logs and exit status back. These are the resources it needs;
+# everything is namespace-scoped (Role, not ClusterRole), so this grants nothing
+# outside `make-lastz-chains`.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nextflow-runner
+  namespace: make-lastz-chains
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nextflow-runner
+  namespace: make-lastz-chains
+rules:
+  # Task execution. `pods/log` is how Nextflow retrieves .command.log;
+  # `pods/status` is how it detects completion and the exit code.
+  - apiGroups: [""]
+    resources: ["pods", "pods/status", "pods/log", "pods/exec"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # Only needed if you switch k8s.computeResourceType from 'Pod' to 'Job'.
+  # Harmless to keep; delete if your admin insists on a minimal grant.
+  - apiGroups: ["batch"]
+    resources: ["jobs", "jobs/status"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nextflow-runner
+  namespace: make-lastz-chains
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nextflow-runner
+subjects:
+  - kind: ServiceAccount
+    name: nextflow-runner
+    namespace: make-lastz-chains

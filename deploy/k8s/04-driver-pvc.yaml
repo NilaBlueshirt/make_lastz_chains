@@ -1,0 +1,27 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Small ReadWriteOnce volume for the driver pod only.
+#
+# The pipeline's work directory is in S3 — this volume is not that. It holds the
+# driver's launch directory: the .nextflow/ cache and history that `-resume`
+# reads. Without it, a driver restart re-runs the whole pipeline from scratch.
+#
+# Only one pod ever mounts it, so ReadWriteOnce is sufficient.
+#
+# If your cluster has no dynamic provisioner at all, delete this file and swap
+# the `workspace` volume in 05-driver-job.yaml for `emptyDir: {}` — you lose
+# -resume across driver restarts, nothing else.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlc-driver-workspace
+  namespace: make-lastz-chains
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # Run `kubectl get storageclass` and put the right name here.
+  # Leave commented out to use the cluster's default StorageClass.
+  # storageClassName: REPLACE_ME_STORAGE_CLASS
+  resources:
+    requests:
+      storage: 50Gi
