@@ -92,11 +92,13 @@ The repo's `nextflow.config` is untouched — `03-configmap.yaml` layers an
 overlay on top of it with `-c`, so a version bump won't clobber these settings.
 The overlay changes four things beyond the executor itself:
 
-- **`publishDir` mode `symlink` → `copy`** for `LASTZ`, `AXT_CHAIN`,
-  `CHAINTOOLS_ANTIREPEAT` and `CHAINC`. Symlinks are free on a shared
-  filesystem and do not exist on S3. `02_lastz_psl` is the expensive one — it's
-  thousands of files; the config says how to switch it off if you don't need
-  the raw per-partition alignments.
+- **`publishDir` mode `symlink` → `copy`** for `LASTZ`, `PSLTOOLS_SPLIT`,
+  `AXT_CHAIN`, `CHAINTOOLS_ANTIREPEAT` and `CHAINC`. Symlinks are free on a
+  shared filesystem and do not exist on S3. `02_lastz_psl` is the expensive
+  one — it's thousands of files, and `03_psl` holds the same alignments
+  regrouped by chromosome; the config says how to switch either off if you
+  don't need them. Only the CPU `--aligner lastz` path is covered: the v4 GPU
+  backends (KegAlign, hspZ) need GPU task pods this overlay doesn't configure.
 - **Dropped LASTZ's `beforeScript` sleep.** Upstream staggers job starts by up
   to 60 s to avoid a SLURM prolog storm. The kube-scheduler has no equivalent
   problem, and at this task count the average 30 s is days of aggregate

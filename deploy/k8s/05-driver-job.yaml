@@ -44,11 +44,14 @@ spec:
           args:
             - |
               nextflow run hillerlab/make_lastz_chains \
-                -r v3.1.7 \
+                -r 76edf8222d71b4711a1e4d8facf0c9fda4591a8f \
                 -c /etc/mlc/k8s.config \
                 -params-file /etc/mlc/params.json \
                 -name "$MLC_RUN_NAME" \
                 -ansi-log false
+              # -r pins the tip of upstream's v4.0.0 branch, which is not yet
+              # tagged and still moves. Swap in the tag once it is released.
+              #
               # To restart a failed run without redoing completed work, append
               # `-resume` above and re-apply this Job. The .nextflow/ cache on
               # the workspace PVC is what makes that possible.

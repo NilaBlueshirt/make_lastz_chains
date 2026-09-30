@@ -17,6 +17,9 @@
 # `--use_container true` matters: the repo's `test` profile sets it false,
 # which leaves per-module container images. Forcing it true keeps everything on
 # the one image, so Wave has one thing to augment instead of a dozen.
+#
+# -r must match 05-driver-job.yaml, or the smoke test proves a different
+# pipeline version from the one you then run.
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: batch/v1
 kind: Job
@@ -44,7 +47,7 @@ spec:
           args:
             - |
               nextflow run hillerlab/make_lastz_chains \
-                -r v3.1.7 \
+                -r 76edf8222d71b4711a1e4d8facf0c9fda4591a8f \
                 -c /etc/mlc/k8s.config \
                 -profile test \
                 --use_container true \

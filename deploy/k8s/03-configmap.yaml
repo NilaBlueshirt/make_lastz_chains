@@ -150,13 +150,18 @@ data:
     process {
 
         // ── publishDir: symlink mode is impossible on object storage ─────────
-        // Upstream publishes four intermediate outputs with mode 'symlink',
+        // Upstream publishes five intermediate outputs with mode 'symlink',
         // which is free on a shared POSIX filesystem and meaningless on S3.
         // Switched to 'copy' so the same artifacts still land in outdir.
         //
-        // 02_lastz_psl is by far the largest of the four (thousands of PSL
+        // 02_lastz_psl is by far the largest of the five (thousands of PSL
         // files). If you do not need the raw per-partition alignments, replace
         // the publishDir block below with `publishDir = [ enabled: false ]`.
+        //
+        // Only the default CPU path (--aligner lastz) is covered. The GPU
+        // backends' symlink publishes (02_kegalign_psl, 02_hspz) are left
+        // alone: those need `-profile gpu` and GPU task pods, which this
+        // overlay does not set up.
         withName: '.*:LASTZ' {
             publishDir = [
                 path: { "${params.outdir}/02_lastz_psl" },
@@ -182,6 +187,16 @@ data:
             // eighth attempt. Watch peak_rss in the trace on your first real
             // pair and settle on a number.
             memory = { 12.GB * task.attempt }
+        }
+
+        // The merged alignments split per reference chromosome. Same data as
+        // 02_lastz_psl, re-bundled — disable it the same way if unneeded.
+        withName: '.*:PSLTOOLS_SPLIT' {
+            publishDir = [
+                path: { "${params.outdir}/03_psl" },
+                mode: 'copy',
+                pattern: '*.psl'
+            ]
         }
 
         withName: '.*:AXT_CHAIN' {
@@ -221,6 +236,8 @@ data:
       "seq2_chunk": 50000000,
       "seq1_lap": 0,
       "seq2_lap": 10000,
+
+      "aligner": "lastz",
 
       "lastz_y": 9400,
       "lastz_h": 2000,
